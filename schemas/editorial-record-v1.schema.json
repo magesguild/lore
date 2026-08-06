@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lore.magesguild.org/schema/editorial-record-v1.json",
+  "type": "object",
+  "required": ["record_id", "text", "claim_type", "status", "evidence_refs", "citations", "provenance"],
+  "properties": {
+    "record_id": {"type": "string"},
+    "title": {"type": "string"},
+    "chapter": {"type": "string"},
+    "section": {"type": "string"},
+    "text": {"type": "string"},
+    "claim_type": {"enum": ["definition", "historical", "empirical_observation", "interpretation", "hypothesis", "method", "care_principle"]},
+    "status": {"enum": ["draft", "reviewed", "approved", "rejected", "superseded"]},
+    "evidence_refs": {"type": "array", "items": {"type": "string"}},
+    "citations": {"type": "array", "items": {"type": "object"}},
+    "confidence": {"type": "string"},
+    "limitations": {"type": "array", "items": {"type": "string"}},
+    "alternative_interpretations": {"type": "array", "items": {"type": "string"}},
+    "provenance": {"type": "object"},
+    "parent_ids": {"type": "array", "items": {"type": "string"}},
+    "autobiographical": {"const": false}
+  }
+}

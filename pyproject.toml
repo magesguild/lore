@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lore"
+version = "0.1.0"
+description = "Installer and registry client for versioned knowledge packages"
+requires-python = ">=3.11"
+
+[project.scripts]
+lore = "lore.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

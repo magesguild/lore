@@ -1,0 +1,158 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import shutil
+import tempfile
+from pathlib import Path
+
+from . import __version__
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _manifest(package: Path) -> tuple[dict, Path]:
+    manifest_path = package / "manifest.json"
+    if not manifest_path.is_file():
+        raise SystemExit(f"not a Lore package: missing {manifest_path}")
+    return json.loads(manifest_path.read_text(encoding="utf-8")), manifest_path
+
+
+def inspect_package(path: Path) -> int:
+    manifest, _ = _manifest(path)
+    print(json.dumps(manifest, indent=2))
+    return 0
+
+
+def verify_package(path: Path) -> int:
+    manifest, _ = _manifest(path)
+    missing = []
+    artifacts = manifest.get("artifacts", manifest.get("contents", {}))
+    for name in artifacts.values():
+        if not (path / name).is_file():
+            missing.append(name)
+    if missing:
+        print(json.dumps({"status": "failed", "missing": missing}, indent=2))
+        return 1
+    if not manifest.get("knowledge_not_memory", False):
+        print(json.dumps({"status": "failed", "reason": "package is not marked knowledge_not_memory"}, indent=2))
+        return 1
+    records = path / artifacts.get("records", "records.jsonl")
+    embedding_index_name = artifacts.get("embedding_index")
+    embeddings = path / artifacts.get("embeddings", "embeddings.jsonl")
+    with records.open(encoding="utf-8") as stream:
+        record_count = sum(1 for line in stream if line.strip())
+    if embedding_index_name:
+        with (path / embedding_index_name).open(encoding="utf-8") as stream:
+            embedding_count = sum(1 for line in stream if line.strip())
+    else:
+        with embeddings.open(encoding="utf-8") as stream:
+            embedding_count = sum(1 for line in stream if line.strip())
+    result = {
+        "status": "passed" if record_count == embedding_count == manifest.get("records") else "failed",
+        "package_id": manifest.get("package_id"),
+        "records": record_count,
+        "embeddings": embedding_count,
+        "embedding_model": manifest.get("embedding", {}).get("model"),
+    }
+    print(json.dumps(result, indent=2))
+    return 0 if result["status"] == "passed" else 1
+
+
+def _safe_component(value: str) -> str:
+    if not value or value in {".", ".."} or "/" in value or "\\" in value:
+        raise SystemExit(f"unsafe package component: {value!r}")
+    return value
+
+
+def _package_version(manifest: dict) -> str:
+    return _safe_component(str(manifest.get("version") or manifest["package_id"]))
+
+
+def install_package(path: Path, root: Path) -> int:
+    manifest, _ = _manifest(path)
+    if verify_package(path) != 0:
+        return 1
+    package_id = _safe_component(manifest["package_id"])
+    version = _package_version(manifest)
+    package_root = root.expanduser().resolve() / package_id
+    versions_root = package_root / "versions"
+    destination = versions_root / version
+    root.mkdir(parents=True, exist_ok=True)
+    versions_root.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        shutil.rmtree(destination)
+    staging = Path(tempfile.mkdtemp(prefix=f".{version}.", dir=versions_root))
+    try:
+        shutil.copytree(path, staging / "package", dirs_exist_ok=True)
+        (staging / "install.json").write_text(
+            json.dumps({"package_id": package_id, "version": version, "source": str(path.resolve())}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        staging.rename(destination)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    active = package_root / "active"
+    temporary_link = package_root / ".active.tmp"
+    temporary_link.unlink(missing_ok=True)
+    temporary_link.symlink_to(Path("versions") / version, target_is_directory=True)
+    temporary_link.replace(active)
+    print(json.dumps({"status": "installed", "package_id": package_id, "version": version, "path": str(active)}, indent=2))
+    return 0
+
+
+def rollback_package(package_id: str, version: str, root: Path) -> int:
+    package_id = _safe_component(package_id)
+    version = _safe_component(version)
+    package_root = root.expanduser().resolve() / package_id
+    destination = package_root / "versions" / version
+    if not destination.is_dir():
+        print(json.dumps({"status": "failed", "reason": "version_not_installed", "package_id": package_id, "version": version}, indent=2))
+        return 1
+    active = package_root / "active"
+    temporary_link = package_root / ".active.tmp"
+    temporary_link.unlink(missing_ok=True)
+    temporary_link.symlink_to(Path("versions") / version, target_is_directory=True)
+    temporary_link.replace(active)
+    print(json.dumps({"status": "rolled_back", "package_id": package_id, "version": version, "path": str(active)}, indent=2))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="lore")
+    parser.add_argument("--version", action="version", version=__version__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    for command in ("inspect", "verify"):
+        sub = subparsers.add_parser(command)
+        sub.add_argument("package", type=Path)
+    install = subparsers.add_parser("install")
+    install.add_argument("package", type=Path)
+    install.add_argument("--root", type=Path, default=Path("~/.lore/collections"))
+    rollback = subparsers.add_parser("rollback")
+    rollback.add_argument("package_id")
+    rollback.add_argument("--to", required=True, dest="version")
+    rollback.add_argument("--root", type=Path, default=Path("~/.lore/collections"))
+
+    args = parser.parse_args(argv)
+    if args.command == "inspect":
+        return inspect_package(args.package)
+    if args.command == "verify":
+        return verify_package(args.package)
+    if args.command == "install":
+        return install_package(args.package, args.root)
+    if args.command == "rollback":
+        return rollback_package(args.package_id, args.version, args.root)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

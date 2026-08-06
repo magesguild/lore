@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lore.magesguild.org/schema/editorial-task-v1.json",
+  "type": "object",
+  "required": ["task_id", "objective", "source_refs", "constraints", "expected_artifact", "status"],
+  "properties": {
+    "task_id": {"type": "string"},
+    "objective": {"type": "string"},
+    "source_refs": {"type": "array", "items": {"type": "string"}},
+    "constraints": {"type": "array", "items": {"type": "string"}},
+    "authorized_scope": {"type": "string"},
+    "expected_artifact": {"type": "string"},
+    "review_roles": {"type": "array", "items": {"type": "string"}},
+    "status": {"enum": ["queued", "drafted", "reviewed", "approved", "rejected"]},
+    "parent_ids": {"type": "array", "items": {"type": "string"}}
+  }
+}
