@@ -100,6 +100,40 @@ def migrate(source: Path, output: Path, publisher_key: Path) -> dict:
     (package / "README.md").write_text(f"# {old.get('title', package_id)}\n\nLore v1 package for Clio's knowledge collections.\n\nThis package is knowledge, not autobiographical memory.\n", encoding="utf-8")
     (package / "LICENSE").write_text("Package redistribution terms are declared in manifest.json and source provenance.\n", encoding="utf-8")
 
+    # The publisher key must exist before the manifest is written, because the
+    # manifest now carries a digest of it.
+    shutil.copy2(publisher_key, package / "publisher.pub")
+
+    artifacts = {
+        "records": "records.jsonl",
+        "embeddings": "embeddings.f32",
+        "embedding_index": "embedding_index.jsonl",
+        "checksums": "checksums.json",
+        "signature": "manifest.sig",
+        "publisher_key": "publisher.pub",
+        "provenance_sources": "provenance/sources.jsonl",
+        "provenance_transformations": "provenance/transformations.jsonl",
+        "license": "LICENSE",
+        "readme": "README.md",
+    }
+
+    # Digests go INSIDE the manifest, because the manifest is what the
+    # signature covers. Carried only in a sidecar checksums.json they are
+    # unsigned: an edit to a payload file and its checksum entry together
+    # leaves a signature over the manifest still valid, so the signature would
+    # attest to a filename list and nothing about the bytes.
+    # PACKAGE_FORMAT.md has required this from the start.
+    #
+    # Two artifacts are structurally excluded: checksums.json cannot contain
+    # its own digest, and manifest.sig signs the manifest and so cannot be
+    # inside it.
+    self_referential = {artifacts["checksums"], artifacts["signature"]}
+    artifact_digests = {
+        name: sha256(package / name)
+        for name in sorted(set(artifacts.values()) - self_referential)
+        if (package / name).is_file()
+    }
+
     manifest = {
         "schema": "lore-package-v1",
         "package_id": package_id,
@@ -124,23 +158,15 @@ def migrate(source: Path, output: Path, publisher_key: Path) -> dict:
         "publisher": {"name": "MagesGuild", "key_file": "publisher.pub"},
         "license": {"package": "declared-in-manifest", "source_licenses": "see provenance"},
         "compatibility": {"lore_schema": "1.x", "nephesh_import": "explicit-adapter-only"},
-        "artifacts": {
-            "records": "records.jsonl",
-            "embeddings": "embeddings.f32",
-            "embedding_index": "embedding_index.jsonl",
-            "checksums": "checksums.json",
-            "signature": "manifest.sig",
-            "publisher_key": "publisher.pub",
-            "provenance_sources": "provenance/sources.jsonl",
-            "provenance_transformations": "provenance/transformations.jsonl",
-            "license": "LICENSE",
-            "readme": "README.md",
-        },
+        "artifacts": artifacts,
+        "artifact_digests": artifact_digests,
         "migration": {"from": source.name, "source_manifest_sha256": sha256(source / "manifest.json")},
         "rollback": "package-pointer-only",
     }
     (package / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    shutil.copy2(publisher_key, package / "publisher.pub")
+    # checksums.json is retained for tooling that predates artifact_digests. It
+    # now also covers manifest.json, so a reader without signature support can
+    # still detect a manifest edit.
     files = {p.relative_to(package).as_posix(): sha256(p) for p in package.rglob("*") if p.is_file() and p.name not in {"checksums.json", "manifest.sig"}}
     (package / "checksums.json").write_text(json.dumps(files, indent=2) + "\n", encoding="utf-8")
     # Signature is created by the caller after all package bytes are final.

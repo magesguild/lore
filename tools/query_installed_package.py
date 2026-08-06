@@ -7,15 +7,34 @@ import argparse
 import json
 import math
 import struct
+import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from lore.chunking import MEASURED_WINDOW  # noqa: E402
+
 
 def embed(query: str, model: str) -> list[float]:
-    payload = json.dumps({"model": model, "input": query}).encode()
+    # truncate=false for the same reason the builder sets it: a query longer
+    # than the model's window would otherwise be silently shortened and
+    # searched as its opening, returning confident results for a question that
+    # was never asked in full.
+    payload = json.dumps({"model": model, "input": query, "truncate": False}).encode()
     request = urllib.request.Request("http://127.0.0.1:11434/api/embed", data=payload, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=120) as response:
-        return json.load(response)["embeddings"][0]
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            return json.load(response)["embeddings"][0]
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", "replace")[:200]
+        raise SystemExit(
+            f"query embedding refused (HTTP {error.code}): {detail}\n"
+            f"query is {len(query)} characters; the model reads about {MEASURED_WINDOW}."
+        ) from error
+    except urllib.error.URLError as error:
+        raise SystemExit(f"embedding endpoint unreachable: {error.reason}") from error
 
 
 def cosine(a: list[float], b: list[float]) -> float:
