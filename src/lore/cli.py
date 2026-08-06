@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 from . import __version__
+from .chunking import MEASURED_WINDOW
 
 
 def _sha256(path: Path) -> str:
@@ -31,12 +32,12 @@ def inspect_package(path: Path) -> int:
     return 0
 
 
-# Roughly the character budget of a 512-token embedding window. Text beyond it
-# is not represented by the record's vector, so retrieval is blind to it. This
-# is a heuristic for reporting, never for rejection — a package with long
-# records is importable, its retrieval simply cannot be trusted to reach past
-# the opening of each record.
-_EMBEDDING_WINDOW_CHARS = 2000
+# The measured content window of the embedding model — see lore.chunking for
+# how it was established. Text beyond it is not represented by the vector, so
+# retrieval is blind to it. Used for reporting, never for rejection: a package
+# with over-long embedded units is importable, its retrieval simply cannot be
+# trusted past what the model could read.
+_EMBEDDING_WINDOW_CHARS = MEASURED_WINDOW
 
 
 def _declared_digests(package: Path, manifest: dict) -> tuple[dict[str, str], str]:
@@ -104,7 +105,14 @@ def verify_package(path: Path) -> int:
     else:
         with embeddings.open(encoding="utf-8") as stream:
             embedding_count = sum(1 for line in stream if line.strip())
-    counts_agree = record_count == embedding_count == manifest.get("records")
+    # A chunked package embeds one vector per chunk, so embeddings legitimately
+    # outnumber records. An unchunked package embeds one vector per record and
+    # the counts must agree exactly.
+    declared_chunks = manifest.get("chunks")
+    if declared_chunks is not None:
+        counts_agree = record_count == manifest.get("records") and embedding_count == declared_chunks
+    else:
+        counts_agree = record_count == embedding_count == manifest.get("records")
 
     digests, digest_source = _declared_digests(path, manifest)
     if not digests:
@@ -124,19 +132,35 @@ def verify_package(path: Path) -> int:
     self_referential = {artifacts.get("checksums"), artifacts.get("signature")}
     unverified = sorted(set(artifacts.values()) - set(digests) - self_referential - {None})
 
-    # Retrieval-geometry report. One vector per record means text past the
-    # embedding window is unreachable by search; this counts how much of the
-    # package is in that condition without failing the package for it.
+    # Retrieval-geometry report. What matters is the size of the EMBEDDED unit,
+    # not the record: a chunked package may hold arbitrarily long records and
+    # still retrieve well, while an unchunked one is blind past each record's
+    # opening. Reported, never fatal — such a package is importable, its
+    # retrieval simply cannot be trusted past what the model could read.
     oversized = 0
     longest = 0
-    with records.open(encoding="utf-8") as stream:
-        for line in stream:
-            if not line.strip():
-                continue
-            length = len(json.loads(line).get("text", ""))
-            longest = max(longest, length)
-            if length > _EMBEDDING_WINDOW_CHARS:
-                oversized += 1
+    if declared_chunks is not None and embedding_index_name:
+        unit = "chunks"
+        with (path / embedding_index_name).open(encoding="utf-8") as stream:
+            for line in stream:
+                if not line.strip():
+                    continue
+                length = json.loads(line).get("chars")
+                if length is None:
+                    continue
+                longest = max(longest, length)
+                if length > _EMBEDDING_WINDOW_CHARS:
+                    oversized += 1
+    else:
+        unit = "records"
+        with records.open(encoding="utf-8") as stream:
+            for line in stream:
+                if not line.strip():
+                    continue
+                length = len(json.loads(line).get("text", ""))
+                longest = max(longest, length)
+                if length > _EMBEDDING_WINDOW_CHARS:
+                    oversized += 1
 
     result = {
         "status": "passed" if counts_agree and not digest_failures and not unverified else "failed",
@@ -147,10 +171,12 @@ def verify_package(path: Path) -> int:
         "digest_source": digest_source,
         "digests_verified": len(digests),
         "signature_covers_digests": digest_source == "manifest",
+        "chunked": declared_chunks is not None,
         "retrieval_geometry": {
+            "embedded_unit": unit,
             "assumed_window_chars": _EMBEDDING_WINDOW_CHARS,
-            "records_exceeding_window": oversized,
-            "longest_record_chars": longest,
+            f"{unit}_exceeding_window": oversized,
+            f"longest_{unit[:-1]}_chars": longest,
         },
     }
     if digest_failures:
@@ -158,9 +184,10 @@ def verify_package(path: Path) -> int:
     if unverified:
         result["artifacts_without_digests"] = unverified
     if oversized:
+        total = embedding_count if unit == "chunks" else record_count
         result["warning"] = (
-            f"{oversized} of {record_count} records exceed the embedding window; "
-            "their vectors represent only the opening of each record and search cannot reach the rest"
+            f"{oversized} of {total} embedded {unit} exceed the model's window; "
+            f"their vectors represent only the opening of each and search cannot reach the rest"
         )
     print(json.dumps(result, indent=2))
     return 0 if result["status"] == "passed" else 1
