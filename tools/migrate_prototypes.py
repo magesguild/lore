@@ -79,12 +79,24 @@ def migrate(source: Path, output: Path, publisher_key: Path) -> dict:
 
     vectors_path = package / "embeddings.f32"
     index_path = package / "embedding_index.jsonl"
+    chunk_count = 0
     with vectors_path.open("wb") as vectors, index_path.open("w", encoding="utf-8") as index:
         for row, vector in enumerate(jsonl(source / "embeddings.jsonl")):
             values = vector["embedding"]
             offset = vectors.tell()
             vectors.write(struct.pack(f"<{len(values)}f", *values))
-            index.write(json.dumps({"record_id": vector["record_id"], "row": row, "byte_offset": offset}) + "\n")
+            entry = {"record_id": vector["record_id"], "row": row, "byte_offset": offset}
+            # Carry chunk identity forward when the prototype was chunked. A
+            # retrieval hit must be traceable to its chunk within its record,
+            # and verify uses chars to check that no embedded unit exceeded the
+            # model's window. Dropping these here would make a chunked package
+            # indistinguishable from an unchunked one.
+            for field in ("chunk_index", "chunk_count", "chars"):
+                if field in vector:
+                    entry[field] = vector[field]
+            index.write(json.dumps(entry) + "\n")
+            chunk_count += 1
+    chunked = chunk_count != len(records)
 
     (package / "provenance").mkdir(exist_ok=True)
     (package / "provenance/sources.jsonl").write_text("".join(json.dumps({"source_id": k, **v}) + "\n" for k, v in source_refs.items()), encoding="utf-8")
@@ -145,6 +157,7 @@ def migrate(source: Path, output: Path, publisher_key: Path) -> dict:
         "scope": old.get("package_scope", "generalized"),
         "records": len(records),
         "record_schema": "lore-record-v1",
+        **({"chunks": chunk_count} if chunked else {}),
         "embedding": {
             "provider": old.get("embedding", {}).get("provider", "ollama"),
             "model": old.get("embedding", {}).get("model", "mxbai-embed-large:latest"),
