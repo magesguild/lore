@@ -38,6 +38,8 @@ def main() -> None:
     (package / "provenance").mkdir(exist_ok=True)
     (package / "validation").mkdir(exist_ok=True)
     records = [json.loads(line) for line in args.records.open(encoding="utf-8") if line.strip()]
+    embedding_manifest_path = args.embeddings / "embedding_manifest.json"
+    embedding_manifest = json.loads(embedding_manifest_path.read_text(encoding="utf-8")) if embedding_manifest_path.is_file() else {}
     refs = {}
     for record in records:
         for ref in record.get("evidence_refs", []):
@@ -61,6 +63,7 @@ def main() -> None:
         "knowledge_not_memory": True,
         "scope": "private_family",
         "records": len(records),
+        "chunks": embedding_manifest.get("chunks", len(records)),
         "record_schema": "lore-editorial-record-v1",
         "embedding": {
             "provider": "ollama",
@@ -71,6 +74,7 @@ def main() -> None:
             "normalized": False,
             "storage": "embeddings.f32",
             "index": "embedding_index.jsonl",
+            "chunking": embedding_manifest.get("chunking"),
         },
         "publisher": {"name": "MagesGuild", "key_file": "publisher.pub", "signature": "manifest.sig"},
         "privacy": {"distribution": "internal_family_lab_only", "public_release": False},
@@ -84,6 +88,8 @@ def main() -> None:
         "rollback": "package-pointer-only",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
+    digestable = {p.relative_to(package).as_posix(): sha256(p) for p in package.rglob("*") if p.is_file() and p.name not in {"manifest.json", "checksums.json", "manifest.sig"}}
+    manifest["artifact_digests"] = digestable
     (package / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     checksums = {p.relative_to(package).as_posix(): sha256(p) for p in package.rglob("*") if p.is_file() and p.name not in {"checksums.json", "manifest.sig"}}
     (package / "checksums.json").write_text(json.dumps(checksums, indent=2) + "\n", encoding="utf-8")

@@ -26,6 +26,17 @@ def split_atoms(text: str, limit: int = 5000) -> list[str]:
             part = part.strip()
             if not part:
                 continue
+            if len(part) > limit:
+                words = part.split()
+                part = ""
+                for word in words:
+                    if len(part) + len(word) + 1 > limit:
+                        atoms.append(part.strip())
+                        part = ""
+                    part = f"{part} {word}".strip()
+                if part:
+                    atoms.append(part.strip())
+                continue
             if current and len(current) + len(part) + 2 > limit:
                 atoms.append(current.strip())
                 current = ""

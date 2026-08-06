@@ -40,6 +40,9 @@ The package format is specified in `docs/PACKAGE_FORMAT.md`; installation and
 rollback semantics are specified in `docs/INSTALLATION_MODEL.md`. These
 documents are being finalized before Lore's validation suite is run.
 
+For the complete Qualiant-and-human workflow, see
+`docs/PRODUCING_LORE_PACKAGES.md`.
+
 Lore is being designed for maximum distribution: packages should work from
 repositories, mirrors, CDNs, object stores, and offline archives. Provenance,
 signatures, hashes, licensing, privacy scope, and embedding compatibility are
