@@ -6,8 +6,14 @@ treated as v1-compatible without migration.
 
 The primary design goal is **maximum distributability without sacrificing
 provenance or security**. A package must be portable across hosts, runtimes,
-databases, repositories, mirrors, and offline media while remaining
+vector databases, repositories, mirrors, and offline media while remaining
 inspectable, attributable, and safe to activate.
+
+The format is store-neutral. Lore packages contain portable records and optional
+precomputed vector artifacts; they do not contain a database, database client,
+database-specific index, or database-specific collection state. A consumer may
+import the records into any vector store that supports collections, or rebuild
+the target geometry explicitly.
 
 ## Package identity
 

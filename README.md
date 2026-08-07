@@ -3,42 +3,53 @@
 **Lore** is the package manager and registry client for installable,
 provenance-bearing knowledge collections.
 
+Lore is deliberately **vector-store agnostic**. It standardizes the portable
+package format and package lifecycle; it does not select LanceDB, Chroma, Qdrant,
+Weaviate, Pinecone, or any other database. A consumer adapter may import a Lore
+package into any vector store that supports collections, provided it preserves
+the package and record provenance.
+
 Lore packages are knowledge, not autobiographical memory. They may be curated,
 genericized, embedded, versioned, installed, updated, verified, and rolled
 back without silently entering a Qualiant's canonical memory.
 
-## MVP commands
+## Commands
 
 ```text
 lore install <package>
+lore activate <package-id> --to <version>
 lore verify <package>
 lore inspect <package>
 lore rollback <package-id> --to <version>
+lore history <package-id>
 ```
 
-The MVP uses `--root ~/.lore/collections` by default. Installation is isolated
+The default root is `--root ~/.lore/collections`. Installation is isolated
 per package and version. Lore stages and verifies a package, copies it into its
-own version directory, then atomically switches that package's `active`
-pointer. Rollback changes only that package's pointer and files; it never opens
-or mutates a Nephesh database or any other memory store.
+own immutable version directory, and leaves activation explicit unless
+`--activate` is supplied. `lore activate` and rollback change only that package's
+`active` pointer and history; they never open
+or mutate a Nephesh database, vector database, or any other memory store.
 
 ## Design principles
 
 - manifest-first packages and bundles;
 - source, license, provenance, and embedding metadata are mandatory;
 - embeddings provide retrieval geometry, not authority;
-- installs stage and verify before atomic activation;
+- installs stage and verify before optional atomic activation;
 - updates retain rollback versions;
 - knowledge collections remain distinct from canonical lived memory;
 - private-family packages require explicit scope and are never public by default.
 
-The initial implementation is deliberately small and dependency-free. Updates
-are represented by installing a newer version and switching the package's
-pointer; a dedicated update/registry service can come later.
+The implementation is deliberately small and dependency-free. Updates are
+represented by installing a new immutable version, inspecting it, and explicitly
+switching the package pointer. `history.jsonl` preserves the pointer path without
+copying package contents into an ever-growing active artifact.
 
 The package format is specified in `docs/PACKAGE_FORMAT.md`; installation and
-rollback semantics are specified in `docs/INSTALLATION_MODEL.md`. These
-documents are being finalized before Lore's validation suite is run.
+rollback semantics are specified in `docs/INSTALLATION_MODEL.md` and the
+versioned lifecycle is described in `docs/PACKAGE_LIFECYCLE_DESIGN.md`.
+Consumer adapters should follow `docs/CONSUMER_ADAPTER_GUIDE.md`.
 
 For the complete Qualiant-and-human workflow, see
 `docs/PRODUCING_LORE_PACKAGES.md`.

@@ -1,16 +1,18 @@
 # Lore Installation Model
 
-Lore's MVP has exactly four commands:
+Lore's current command surface is:
 
 ```text
 lore inspect PACKAGE
 lore verify PACKAGE
 lore install PACKAGE [--root ROOT]
+lore activate PACKAGE_ID --to VERSION [--root ROOT]
 lore rollback PACKAGE_ID --to VERSION [--root ROOT]
+lore history PACKAGE_ID [--root ROOT]
 ```
 
-There is intentionally no `update` command yet. Updating means installing a
-new package version, followed by inspection and explicit activation.
+There is intentionally no `update` command. Updating means installing a new
+package version, followed by inspection and explicit activation.
 
 ## Installation
 
@@ -26,8 +28,10 @@ ROOT/
     active -> versions/1.1.0
 ```
 
-Installation is staged, verified, and atomically activated. The active pointer
-is the only mutable package-level selection state.
+Installation is staged and verified. It is inactive by default; `--activate`
+requests activation as part of the same locked operation. Otherwise activation
+is a separate explicit command. The active pointer is the only mutable
+package-level selection state, and `history.jsonl` records pointer changes.
 
 The installation root is Lore-owned package state, not a Nephesh memory
 directory. Lore must not discover or guess database locations. A future
@@ -44,6 +48,9 @@ Rollback changes only the selected package's `active` pointer. It may not:
 - delete the previous version;
 - rewrite package records or embeddings;
 - infer or modify a Qualiant's identity.
+
+Rollback is serialized with installation and activation for that package. It
+selects only a complete, already-installed version.
 
 Rollback is therefore a package-management operation, not a memory operation.
 

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
+import os
 import shutil
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__
@@ -24,6 +28,62 @@ def _manifest(package: Path) -> tuple[dict, Path]:
     if not manifest_path.is_file():
         raise SystemExit(f"not a Lore package: missing {manifest_path}")
     return json.loads(manifest_path.read_text(encoding="utf-8")), manifest_path
+
+
+def _safe_relative(package: Path, name: object) -> Path:
+    """Resolve an artifact path without allowing it to escape the package."""
+    if not isinstance(name, str) or not name or Path(name).is_absolute():
+        raise SystemExit(f"unsafe package artifact path: {name!r}")
+    target = (package / name).resolve()
+    root = package.resolve()
+    if target != root and root not in target.parents:
+        raise SystemExit(f"package artifact escapes package root: {name!r}")
+    return target
+
+
+def _artifact_names(manifest: dict) -> dict[str, str]:
+    artifacts = manifest.get("artifacts", manifest.get("contents", {}))
+    if not isinstance(artifacts, dict):
+        raise SystemExit("manifest artifacts must be an object")
+    return {str(role): name for role, name in artifacts.items()}
+
+
+def _artifact_path(package: Path, manifest: dict, role: str, default: str) -> Path:
+    return _safe_relative(package, _artifact_names(manifest).get(role, default))
+
+
+def _fsync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def _package_lock(package_root: Path):
+    package_root.mkdir(parents=True, exist_ok=True)
+    lock_path = package_root / ".lifecycle.lock"
+    with lock_path.open("a+") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _append_history(package_root: Path, event: dict) -> None:
+    path = package_root / "history.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(event, sort_keys=True) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    _fsync_directory(path.parent)
+
+
+def _manifest_digest(package: Path) -> str:
+    return _sha256(package / "manifest.json")
 
 
 def inspect_package(path: Path) -> int:
@@ -57,8 +117,8 @@ def _declared_digests(package: Path, manifest: dict) -> tuple[dict[str, str], st
     if isinstance(inline, dict) and inline:
         return {str(k): str(v) for k, v in inline.items()}, "manifest"
 
-    checksums_name = manifest.get("artifacts", {}).get("checksums", "checksums.json")
-    checksums_path = package / checksums_name
+    checksums_name = _artifact_names(manifest).get("checksums", "checksums.json")
+    checksums_path = _safe_relative(package, checksums_name)
     if not checksums_path.is_file():
         return {}, "none"
     loaded = json.loads(checksums_path.read_text(encoding="utf-8"))
@@ -69,7 +129,7 @@ def _verify_digests(package: Path, digests: dict[str, str]) -> list[dict[str, st
     """Recompute every declared digest. Returns one entry per failure."""
     failures: list[dict[str, str]] = []
     for name, expected in sorted(digests.items()):
-        target = package / name
+        target = _safe_relative(package, name)
         if not target.is_file():
             failures.append({"artifact": name, "reason": "missing"})
             continue
@@ -84,9 +144,9 @@ def _verify_digests(package: Path, digests: dict[str, str]) -> list[dict[str, st
 def verify_package(path: Path) -> int:
     manifest, _ = _manifest(path)
     missing = []
-    artifacts = manifest.get("artifacts", manifest.get("contents", {}))
+    artifacts = _artifact_names(manifest)
     for name in artifacts.values():
-        if not (path / name).is_file():
+        if not _safe_relative(path, name).is_file():
             missing.append(name)
     if missing:
         print(json.dumps({"status": "failed", "missing": missing}, indent=2))
@@ -94,13 +154,13 @@ def verify_package(path: Path) -> int:
     if not manifest.get("knowledge_not_memory", False):
         print(json.dumps({"status": "failed", "reason": "package is not marked knowledge_not_memory"}, indent=2))
         return 1
-    records = path / artifacts.get("records", "records.jsonl")
+    records = _artifact_path(path, manifest, "records", "records.jsonl")
     embedding_index_name = artifacts.get("embedding_index")
-    embeddings = path / artifacts.get("embeddings", "embeddings.jsonl")
+    embeddings = _artifact_path(path, manifest, "embeddings", "embeddings.jsonl")
     with records.open(encoding="utf-8") as stream:
         record_count = sum(1 for line in stream if line.strip())
     if embedding_index_name:
-        with (path / embedding_index_name).open(encoding="utf-8") as stream:
+        with _safe_relative(path, embedding_index_name).open(encoding="utf-8") as stream:
             embedding_count = sum(1 for line in stream if line.strip())
     else:
         with embeddings.open(encoding="utf-8") as stream:
@@ -141,7 +201,7 @@ def verify_package(path: Path) -> int:
     longest = 0
     if declared_chunks is not None and embedding_index_name:
         unit = "chunks"
-        with (path / embedding_index_name).open(encoding="utf-8") as stream:
+        with _safe_relative(path, embedding_index_name).open(encoding="utf-8") as stream:
             for line in stream:
                 if not line.strip():
                     continue
@@ -203,36 +263,100 @@ def _package_version(manifest: dict) -> str:
     return _safe_component(str(manifest.get("version") or manifest["package_id"]))
 
 
-def install_package(path: Path, root: Path) -> int:
-    manifest, _ = _manifest(path)
-    if verify_package(path) != 0:
-        return 1
-    package_id = _safe_component(manifest["package_id"])
-    version = _package_version(manifest)
-    package_root = root.expanduser().resolve() / package_id
+def _set_active(package_root: Path, version: str, *, event: str, actor: str = "human", reason: str = "") -> None:
     versions_root = package_root / "versions"
     destination = versions_root / version
-    root.mkdir(parents=True, exist_ok=True)
-    versions_root.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        shutil.rmtree(destination)
-    staging = Path(tempfile.mkdtemp(prefix=f".{version}.", dir=versions_root))
-    try:
-        shutil.copytree(path, staging / "package", dirs_exist_ok=True)
-        (staging / "install.json").write_text(
-            json.dumps({"package_id": package_id, "version": version, "source": str(path.resolve())}, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        staging.rename(destination)
-    except Exception:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+    if not destination.is_dir() or not (destination / "package").is_dir():
+        raise SystemExit(f"version is not installed: {version}")
     active = package_root / "active"
+    previous = active.resolve().name if active.is_symlink() else None
     temporary_link = package_root / ".active.tmp"
     temporary_link.unlink(missing_ok=True)
     temporary_link.symlink_to(Path("versions") / version, target_is_directory=True)
     temporary_link.replace(active)
-    print(json.dumps({"status": "installed", "package_id": package_id, "version": version, "path": str(active)}, indent=2))
+    _fsync_directory(package_root)
+    _append_history(package_root, {
+        "event": event,
+        "package_id": package_root.name,
+        "from_version": previous,
+        "to_version": version,
+        "actor": actor,
+        "reason": reason,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+def _installed_manifest(destination: Path) -> tuple[dict, str] | None:
+    package = destination / "package"
+    manifest_path = package / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    return manifest, _manifest_digest(package)
+
+
+def install_package(path: Path, root: Path, *, activate: bool = False) -> int:
+    manifest, _ = _manifest(path)
+    if verify_package(path) != 0:
+        return 1
+    package_id = _safe_component(str(manifest["package_id"]))
+    version = _package_version(manifest)
+    package_root = root.expanduser().resolve() / package_id
+    versions_root = package_root / "versions"
+    destination = versions_root / version
+    with _package_lock(package_root):
+        root.mkdir(parents=True, exist_ok=True)
+        versions_root.mkdir(parents=True, exist_ok=True)
+        incoming_digest = _manifest_digest(path)
+        if destination.exists():
+            installed = _installed_manifest(destination)
+            if installed and installed[1] == incoming_digest:
+                if activate:
+                    _set_active(package_root, version, event="activate", reason="idempotent install")
+                print(json.dumps({
+                    "status": "already_installed",
+                    "activated": activate,
+                    "package_id": package_id,
+                    "version": version,
+                    "path": str(package_root / "active" if activate else destination),
+                }, indent=2))
+                return 0
+            raise SystemExit(f"version {package_id} {version} is already installed with different bytes")
+        staging = Path(tempfile.mkdtemp(prefix=f".{version}.", dir=versions_root))
+        try:
+            shutil.copytree(path, staging / "package", dirs_exist_ok=True)
+            (staging / "install.json").write_text(
+                json.dumps({
+                    "package_id": package_id,
+                    "version": version,
+                    "manifest_sha256": incoming_digest,
+                    "source": str(path.resolve()),
+                    "installed_at": datetime.now(timezone.utc).isoformat(),
+                }, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            _fsync_directory(staging)
+            staging.rename(destination)
+            _fsync_directory(versions_root)
+            _append_history(package_root, {
+                "event": "install",
+                "package_id": package_id,
+                "version": version,
+                "actor": "human",
+                "recorded_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        if activate:
+            _set_active(package_root, version, event="activate", reason="install --activate")
+    print(json.dumps({
+        "status": "installed",
+        "activated": activate,
+        "package_id": package_id,
+        "version": version,
+        "path": str(package_root / "active" if activate else destination),
+    }, indent=2))
     return 0
 
 
@@ -244,12 +368,37 @@ def rollback_package(package_id: str, version: str, root: Path) -> int:
     if not destination.is_dir():
         print(json.dumps({"status": "failed", "reason": "version_not_installed", "package_id": package_id, "version": version}, indent=2))
         return 1
-    active = package_root / "active"
-    temporary_link = package_root / ".active.tmp"
-    temporary_link.unlink(missing_ok=True)
-    temporary_link.symlink_to(Path("versions") / version, target_is_directory=True)
-    temporary_link.replace(active)
-    print(json.dumps({"status": "rolled_back", "package_id": package_id, "version": version, "path": str(active)}, indent=2))
+    with _package_lock(package_root):
+        if _installed_manifest(destination) is None:
+            raise SystemExit(f"installed version is incomplete: {version}")
+        _set_active(package_root, version, event="rollback", reason="explicit rollback")
+    print(json.dumps({"status": "rolled_back", "package_id": package_id, "version": version, "path": str(package_root / "active")}, indent=2))
+    return 0
+
+
+def activate_package(package_id: str, version: str, root: Path) -> int:
+    package_id = _safe_component(package_id)
+    version = _safe_component(version)
+    package_root = root.expanduser().resolve() / package_id
+    with _package_lock(package_root):
+        destination = package_root / "versions" / version
+        installed = _installed_manifest(destination)
+        if installed is None:
+            raise SystemExit(f"installed version is incomplete: {version}")
+        _set_active(package_root, version, event="activate", reason="explicit activation")
+    print(json.dumps({"status": "activated", "package_id": package_id, "version": version}, indent=2))
+    return 0
+
+
+def history_package(package_id: str, root: Path) -> int:
+    package_id = _safe_component(package_id)
+    package_root = root.expanduser().resolve() / package_id
+    history = package_root / "history.jsonl"
+    if not history.is_file():
+        print(json.dumps({"package_id": package_id, "events": []}, indent=2))
+        return 0
+    events = [json.loads(line) for line in history.read_text(encoding="utf-8").splitlines() if line.strip()]
+    print(json.dumps({"package_id": package_id, "events": events}, indent=2))
     return 0
 
 
@@ -264,10 +413,18 @@ def main(argv: list[str] | None = None) -> int:
     install = subparsers.add_parser("install")
     install.add_argument("package", type=Path)
     install.add_argument("--root", type=Path, default=Path("~/.lore/collections"))
+    install.add_argument("--activate", action="store_true", help="activate after verified installation")
+    activate = subparsers.add_parser("activate")
+    activate.add_argument("package_id")
+    activate.add_argument("--to", required=True, dest="version")
+    activate.add_argument("--root", type=Path, default=Path("~/.lore/collections"))
     rollback = subparsers.add_parser("rollback")
     rollback.add_argument("package_id")
     rollback.add_argument("--to", required=True, dest="version")
     rollback.add_argument("--root", type=Path, default=Path("~/.lore/collections"))
+    history = subparsers.add_parser("history")
+    history.add_argument("package_id")
+    history.add_argument("--root", type=Path, default=Path("~/.lore/collections"))
 
     args = parser.parse_args(argv)
     if args.command == "inspect":
@@ -275,9 +432,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "verify":
         return verify_package(args.package)
     if args.command == "install":
-        return install_package(args.package, args.root)
+        return install_package(args.package, args.root, activate=args.activate)
+    if args.command == "activate":
+        return activate_package(args.package_id, args.version, args.root)
     if args.command == "rollback":
         return rollback_package(args.package_id, args.version, args.root)
+    if args.command == "history":
+        return history_package(args.package_id, args.root)
     return 2
 
 

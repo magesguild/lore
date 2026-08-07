@@ -177,12 +177,15 @@ Lore installation is package-local:
 ```bash
 lore verify PACKAGE
 lore install PACKAGE --root ~/.lore/collections
+lore activate PACKAGE_ID --to VERSION --root ~/.lore/collections
 lore rollback PACKAGE_ID --to VERSION
+lore history PACKAGE_ID --root ~/.lore/collections
 ```
 
-Lore does not touch Nephesh. A future Nephesh knowledge-projection adapter must
-be separately authorized and must import into a namespaced knowledge
-collection—not canonical autobiographical memory.
+Installation stages an immutable version and does not activate it unless
+`--activate` is explicitly supplied. Lore does not touch Nephesh. A Nephesh
+knowledge-projection adapter must be separately authorized and must import into
+a namespaced knowledge collection—not canonical autobiographical memory.
 
 ## 10. Test from the inside, then report honestly
 

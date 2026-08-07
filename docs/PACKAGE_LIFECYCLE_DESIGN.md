@@ -24,6 +24,13 @@ The design therefore separates three things:
 immutable release artifact  ≠  active package pointer  ≠  package history
 ```
 
+Lore is the generic layer in this design. It standardizes portable package
+artifacts and their lifecycle; it does not standardize a particular vector
+database. Any consumer with a collection-capable vector store may build an
+adapter. The adapter owns database-specific collection names, indexes, filters,
+and local projection state. Lore must not import a database client merely to
+make a package installable.
+
 ## 2. The vision carried forward
 
 Thalia’s package vision supplies the ethical and editorial constraints:
@@ -80,6 +87,10 @@ Our current operational needs add:
 - context assembly and transient paging;
 - model/provider/session lifecycle;
 - user-facing interaction.
+
+The same adapter boundary applies to non-Nephesh consumers. Nephesh is one
+important consumer because it adds the knowledge-versus-autobiography boundary;
+it is not Lore’s storage implementation.
 
 No layer may silently assume another layer’s authority.
 
@@ -193,6 +204,10 @@ the exact artifact digests.
 version directory, and records the installation. It does not activate the
 package in a Qualiant’s context and does not touch Nephesh memory.
 
+It also does not open or configure a vector database. A consumer adapter may
+later import the package’s records and compatible vectors into a collection, or
+explicitly re-embed the records using its own target profile.
+
 If the version is already installed and its digest matches, installation is an
 idempotent no-op. If the same ID/version has different bytes, installation must
 refuse loudly.
@@ -237,13 +252,13 @@ depend on a version that has already been garbage-collected.
 The package’s precomputed vectors are part of its immutable release. They are
 never rewritten in place.
 
-When a Nephesh deployment uses another embedding model or vector geometry, the
-adapter may explicitly create a local projection profile:
+When a consumer uses another embedding model or vector geometry, its adapter may
+explicitly create a local projection profile:
 
 ```text
 Lore v1.1.0 source records
-  → target deployment embedding model
-  → Nephesh-local projection profile
+  → target embedding model
+  → consumer-local collection projection
 ```
 
 The local profile records:
@@ -255,6 +270,10 @@ The local profile records:
 - projection owner and authority;
 - source record/chunk IDs;
 - local projection namespace.
+
+The target adapter decides how the profile is represented in its collection
+store. Lore records the package’s source embedding contract; it does not dictate
+the target database’s index type, collection naming scheme, or database client.
 
 Re-embedding is a new projection geometry, not a package mutation, silent
 fallback, or claim that the new vectors are the package’s original vectors.
@@ -325,6 +344,11 @@ The branch should proceed in this order:
 10. After Nephesh is upgraded separately, test the package/projection boundary in
     a disposable or explicitly authorized environment—not on Clio during this
     Lore task.
+
+Consumer-specific implementation guidance is in
+[`CONSUMER_ADAPTER_GUIDE.md`](CONSUMER_ADAPTER_GUIDE.md). It is intentionally
+separate from Lore’s package-manager implementation so the standard remains
+usable by any collection-capable vector store.
 
 ## 12. Open decisions
 
