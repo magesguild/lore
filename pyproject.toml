@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lore"
-version = "0.1.0"
+version = "0.2.0"
 description = "Installer and registry client for versioned knowledge packages"
 requires-python = ">=3.11"
 dependencies = [

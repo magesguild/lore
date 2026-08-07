@@ -1,5 +1,7 @@
 # Lore
 
+**Version:** 0.2.0
+
 **Lore** is the package manager and registry client for installable,
 provenance-bearing knowledge collections.
 
