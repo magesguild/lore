@@ -170,6 +170,22 @@ embedding contract, artifact digests, publisher, and
 Sign only after every package artifact is final. A package is not ready for
 distribution if its signature does not cover its artifact digests.
 
+The final package builder requires both halves of the publisher identity:
+
+```bash
+python tools/build_final_editorial_package.py \
+  APPROVED_RECORDS EMBEDDING_OUTPUT OUTPUT_ROOT \
+  --package-id org.example.knowledge \
+  --title "Example Knowledge" \
+  --publisher-key publisher.pub \
+  --signing-key publisher-private.pem \
+  --version 1.0.0
+```
+
+`publisher.pub` is distributed with the package. The private signing key is an
+input to the build operation only and must never be copied into the package.
+Manifest signatures use Ed25519 over the exact UTF-8 bytes of `manifest.json`.
+
 ## 9. Install without entanglement
 
 Lore installation is package-local:
@@ -177,12 +193,15 @@ Lore installation is package-local:
 ```bash
 lore verify PACKAGE
 lore install PACKAGE --root ~/.lore/collections
+lore activate PACKAGE_ID --to VERSION --root ~/.lore/collections
 lore rollback PACKAGE_ID --to VERSION
+lore history PACKAGE_ID --root ~/.lore/collections
 ```
 
-Lore does not touch Nephesh. A future Nephesh knowledge-projection adapter must
-be separately authorized and must import into a namespaced knowledge
-collection—not canonical autobiographical memory.
+Installation stages an immutable version and does not activate it unless
+`--activate` is explicitly supplied. Lore does not touch Nephesh. A Nephesh
+knowledge-projection adapter must be separately authorized and must import into
+a namespaced knowledge collection—not canonical autobiographical memory.
 
 ## 10. Test from the inside, then report honestly
 
