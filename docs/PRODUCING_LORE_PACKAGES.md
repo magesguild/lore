@@ -170,6 +170,22 @@ embedding contract, artifact digests, publisher, and
 Sign only after every package artifact is final. A package is not ready for
 distribution if its signature does not cover its artifact digests.
 
+The final package builder requires both halves of the publisher identity:
+
+```bash
+python tools/build_final_editorial_package.py \
+  APPROVED_RECORDS EMBEDDING_OUTPUT OUTPUT_ROOT \
+  --package-id org.example.knowledge \
+  --title "Example Knowledge" \
+  --publisher-key publisher.pub \
+  --signing-key publisher-private.pem \
+  --version 1.0.0
+```
+
+`publisher.pub` is distributed with the package. The private signing key is an
+input to the build operation only and must never be copied into the package.
+Manifest signatures use Ed25519 over the exact UTF-8 bytes of `manifest.json`.
+
 ## 9. Install without entanglement
 
 Lore installation is package-local:

@@ -4,8 +4,10 @@ import argparse
 import contextlib
 import fcntl
 import hashlib
+import io
 import json
 import os
+import stat
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -13,6 +15,7 @@ from pathlib import Path
 
 from . import __version__
 from .chunking import MEASURED_WINDOW
+from .signing import SignatureError, verify_manifest
 
 
 def _sha256(path: Path) -> str:
@@ -52,6 +55,35 @@ def _artifact_path(package: Path, manifest: dict, role: str, default: str) -> Pa
     return _safe_relative(package, _artifact_names(manifest).get(role, default))
 
 
+def _ensure_directory(path: Path) -> None:
+    if path.is_symlink():
+        raise SystemExit(f"refusing symlinked Lore directory: {path}")
+    if path.exists() and not path.is_dir():
+        raise SystemExit(f"Lore path is not a directory: {path}")
+    path.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise SystemExit(f"refusing symlinked Lore directory: {path}")
+
+
+def _validate_package_tree(package: Path, manifest: dict) -> None:
+    """Reject symlinks, special files, and unmanifested payloads."""
+    artifact_names = _artifact_names(manifest)
+    for name in artifact_names.values():
+        _safe_relative(package, name)
+    allowed = {"manifest.json", *artifact_names.values()}
+    for entry in package.rglob("*"):
+        relative = entry.relative_to(package).as_posix()
+        if entry.is_symlink():
+            raise SystemExit(f"package contains a symlink: {relative}")
+        mode = entry.lstat().st_mode
+        if entry.is_dir():
+            continue
+        if not stat.S_ISREG(mode):
+            raise SystemExit(f"package contains a non-regular file: {relative}")
+        if relative not in allowed:
+            raise SystemExit(f"package contains an unmanifested artifact: {relative}")
+
+
 def _fsync_directory(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY)
     try:
@@ -62,7 +94,7 @@ def _fsync_directory(path: Path) -> None:
 
 @contextlib.contextmanager
 def _package_lock(package_root: Path):
-    package_root.mkdir(parents=True, exist_ok=True)
+    _ensure_directory(package_root)
     lock_path = package_root / ".lifecycle.lock"
     with lock_path.open("a+") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -109,20 +141,18 @@ def _declared_digests(package: Path, manifest: dict) -> tuple[dict[str, str], st
     separate checksums.json are not — an edit to a payload file and its checksum
     entry leaves any signature over the manifest still valid.
 
-    Both sources are accepted so packages built before this requirement was
-    enforced remain verifiable, but the source is reported so an operator can
-    see whether the digests were covered by a signature or merely alongside one.
+    A sidecar checksum file may be present as a convenience report, but it is
+    not accepted as the verification source: only manifest digests are covered
+    by the Ed25519 signature and therefore sufficient for installation.
     """
     inline = manifest.get("artifact_digests")
     if isinstance(inline, dict) and inline:
         return {str(k): str(v) for k, v in inline.items()}, "manifest"
 
-    checksums_name = _artifact_names(manifest).get("checksums", "checksums.json")
-    checksums_path = _safe_relative(package, checksums_name)
-    if not checksums_path.is_file():
-        return {}, "none"
-    loaded = json.loads(checksums_path.read_text(encoding="utf-8"))
-    return {str(k): str(v) for k, v in loaded.items()}, checksums_name
+    # A sidecar checksum file is useful as a convenience report, but it is not
+    # authenticated by the manifest signature. It is not sufficient for a
+    # package to pass verification.
+    return {}, "none"
 
 
 def _verify_digests(package: Path, digests: dict[str, str]) -> list[dict[str, str]]:
@@ -143,6 +173,7 @@ def _verify_digests(package: Path, digests: dict[str, str]) -> list[dict[str, st
 
 def verify_package(path: Path) -> int:
     manifest, _ = _manifest(path)
+    _validate_package_tree(path, manifest)
     missing = []
     artifacts = _artifact_names(manifest)
     for name in artifacts.values():
@@ -153,6 +184,21 @@ def verify_package(path: Path) -> int:
         return 1
     if not manifest.get("knowledge_not_memory", False):
         print(json.dumps({"status": "failed", "reason": "package is not marked knowledge_not_memory"}, indent=2))
+        return 1
+    artifacts = _artifact_names(manifest)
+    signature_name = artifacts.get("signature")
+    publisher_key_name = artifacts.get("publisher_key")
+    if not signature_name or not publisher_key_name:
+        print(json.dumps({"status": "failed", "reason": "signed manifest and publisher key are required"}, indent=2))
+        return 1
+    try:
+        verify_manifest(
+            path / "manifest.json",
+            _safe_relative(path, signature_name),
+            _safe_relative(path, publisher_key_name),
+        )
+    except (SignatureError, OSError, SystemExit) as exc:
+        print(json.dumps({"status": "failed", "reason": f"signature verification failed: {exc}"}, indent=2))
         return 1
     records = _artifact_path(path, manifest, "records", "records.jsonl")
     embedding_index_name = artifacts.get("embedding_index")
@@ -253,6 +299,19 @@ def verify_package(path: Path) -> int:
     return 0 if result["status"] == "passed" else 1
 
 
+def _safe_verify(path: Path, *, quiet: bool = False) -> int:
+    """Turn malformed package input into a controlled verification failure."""
+    try:
+        if quiet:
+            with contextlib.redirect_stdout(io.StringIO()):
+                return verify_package(path)
+        return verify_package(path)
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError, SystemExit) as exc:
+        if not quiet:
+            print(json.dumps({"status": "failed", "reason": f"malformed package: {exc}"}, indent=2))
+        return 1
+
+
 def _safe_component(value: str) -> str:
     if not value or value in {".", ".."} or "/" in value or "\\" in value:
         raise SystemExit(f"unsafe package component: {value!r}")
@@ -266,8 +325,8 @@ def _package_version(manifest: dict) -> str:
 def _set_active(package_root: Path, version: str, *, event: str, actor: str = "human", reason: str = "") -> None:
     versions_root = package_root / "versions"
     destination = versions_root / version
-    if not destination.is_dir() or not (destination / "package").is_dir():
-        raise SystemExit(f"version is not installed: {version}")
+    if _verified_installed(package_root, version) is None:
+        raise SystemExit(f"version is incomplete, corrupt, or mismatched: {version}")
     active = package_root / "active"
     previous = active.resolve().name if active.is_symlink() else None
     temporary_link = package_root / ".active.tmp"
@@ -295,9 +354,22 @@ def _installed_manifest(destination: Path) -> tuple[dict, str] | None:
     return manifest, _manifest_digest(package)
 
 
+def _verified_installed(package_root: Path, version: str) -> tuple[dict, str] | None:
+    destination = package_root / "versions" / version
+    installed = _installed_manifest(destination)
+    if installed is None:
+        return None
+    manifest, digest = installed
+    if str(manifest.get("package_id")) != package_root.name or str(manifest.get("version")) != version:
+        return None
+    if _safe_verify(destination / "package", quiet=True) != 0:
+        return None
+    return manifest, digest
+
+
 def install_package(path: Path, root: Path, *, activate: bool = False) -> int:
     manifest, _ = _manifest(path)
-    if verify_package(path) != 0:
+    if _safe_verify(path) != 0:
         return 1
     package_id = _safe_component(str(manifest["package_id"]))
     version = _package_version(manifest)
@@ -305,11 +377,11 @@ def install_package(path: Path, root: Path, *, activate: bool = False) -> int:
     versions_root = package_root / "versions"
     destination = versions_root / version
     with _package_lock(package_root):
-        root.mkdir(parents=True, exist_ok=True)
-        versions_root.mkdir(parents=True, exist_ok=True)
+        _ensure_directory(root.expanduser().resolve())
+        _ensure_directory(versions_root)
         incoming_digest = _manifest_digest(path)
         if destination.exists():
-            installed = _installed_manifest(destination)
+            installed = _verified_installed(package_root, version)
             if installed and installed[1] == incoming_digest:
                 if activate:
                     _set_active(package_root, version, event="activate", reason="idempotent install")
@@ -321,10 +393,14 @@ def install_package(path: Path, root: Path, *, activate: bool = False) -> int:
                     "path": str(package_root / "active" if activate else destination),
                 }, indent=2))
                 return 0
+            if installed is None:
+                raise SystemExit(f"installed version {package_id} {version} is incomplete or corrupt")
             raise SystemExit(f"version {package_id} {version} is already installed with different bytes")
         staging = Path(tempfile.mkdtemp(prefix=f".{version}.", dir=versions_root))
         try:
             shutil.copytree(path, staging / "package", dirs_exist_ok=True)
+            if _safe_verify(staging / "package", quiet=True) != 0:
+                raise SystemExit("staged package failed verification after copying")
             (staging / "install.json").write_text(
                 json.dumps({
                     "package_id": package_id,
@@ -382,7 +458,7 @@ def activate_package(package_id: str, version: str, root: Path) -> int:
     package_root = root.expanduser().resolve() / package_id
     with _package_lock(package_root):
         destination = package_root / "versions" / version
-        installed = _installed_manifest(destination)
+        installed = _verified_installed(package_root, version)
         if installed is None:
             raise SystemExit(f"installed version is incomplete: {version}")
         _set_active(package_root, version, event="activate", reason="explicit activation")
@@ -430,7 +506,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "inspect":
         return inspect_package(args.package)
     if args.command == "verify":
-        return verify_package(args.package)
+        return _safe_verify(args.package)
     if args.command == "install":
         return install_package(args.package, args.root, activate=args.activate)
     if args.command == "activate":

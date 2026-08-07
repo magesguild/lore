@@ -10,6 +10,8 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+from lore.signing import sign_manifest
+
 
 def sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -27,6 +29,7 @@ def main() -> None:
     parser.add_argument("--package-id", required=True)
     parser.add_argument("--title", required=True)
     parser.add_argument("--publisher-key", type=Path, required=True)
+    parser.add_argument("--signing-key", type=Path, required=True)
     parser.add_argument("--version", default="1.0.0")
     args = parser.parse_args()
     package = args.output / args.package_id / args.version
@@ -93,6 +96,7 @@ def main() -> None:
     (package / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     checksums = {p.relative_to(package).as_posix(): sha256(p) for p in package.rglob("*") if p.is_file() and p.name not in {"checksums.json", "manifest.sig"}}
     (package / "checksums.json").write_text(json.dumps(checksums, indent=2) + "\n", encoding="utf-8")
+    sign_manifest(package / "manifest.json", args.signing_key, package / "manifest.sig")
     print(json.dumps({"package": str(package), "records": len(records), "scope": "private_family"}, indent=2))
 
 

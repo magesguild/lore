@@ -7,6 +7,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 from lore.cli import activate_package, history_package, install_package, rollback_package, verify_package
 
 
@@ -22,6 +25,13 @@ def _package(root: Path, version: str, *, text: str = "knowledge") -> Path:
         json.dumps({"record_id": "r1", "row": 0, "chars": len(text)}) + "\n",
         encoding="utf-8",
     )
+    private_key = Ed25519PrivateKey.generate()
+    (package / "publisher.pub").write_bytes(
+        private_key.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
     manifest = {
         "schema": "lore-package-v1",
         "package_id": "org.test.knowledge",
@@ -29,13 +39,21 @@ def _package(root: Path, version: str, *, text: str = "knowledge") -> Path:
         "records": 1,
         "knowledge_not_memory": True,
         "embedding": {"model": "test", "dimensions": 2, "dtype": "float32", "endianness": "little"},
-        "artifacts": {"records": "records.jsonl", "embeddings": "embeddings.f32", "embedding_index": "embedding_index.jsonl"},
+        "publisher": {"signature": "manifest.sig", "key_file": "publisher.pub"},
+        "artifacts": {
+            "records": "records.jsonl",
+            "embeddings": "embeddings.f32",
+            "embedding_index": "embedding_index.jsonl",
+            "signature": "manifest.sig",
+            "publisher_key": "publisher.pub",
+        },
     }
     manifest["artifact_digests"] = {
         name: hashlib.sha256((package / name).read_bytes()).hexdigest()
-        for name in ("records.jsonl", "embeddings.f32", "embedding_index.jsonl")
+        for name in ("records.jsonl", "embeddings.f32", "embedding_index.jsonl", "publisher.pub")
     }
     (package / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    (package / "manifest.sig").write_bytes(private_key.sign((package / "manifest.json").read_bytes()))
     return package
 
 
@@ -77,9 +95,27 @@ class InstallationLifecycleTests(unittest.TestCase):
 
     def test_same_version_same_bytes_is_idempotent(self) -> None:
         first = _package(self.root, "1.0.0")
-        second = _package(self.root / "other", "1.0.0")
         install_package(first, self.install_root)
-        self.assertEqual(install_package(second, self.install_root), 0)
+        self.assertEqual(install_package(first, self.install_root), 0)
+
+    def test_namespace_symlink_cannot_escape_root(self) -> None:
+        package = _package(self.root, "1.0.0")
+        outside = self.root / "outside"
+        outside.mkdir()
+        root = self.install_root
+        root.mkdir()
+        (root / "org.test.knowledge").symlink_to(outside, target_is_directory=True)
+        with self.assertRaises(SystemExit):
+            install_package(package, root)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_tampered_installed_version_is_not_idempotent(self) -> None:
+        package = _package(self.root, "1.0.0")
+        install_package(package, self.install_root)
+        installed_records = self.install_root / "org.test.knowledge" / "versions" / "1.0.0" / "package" / "records.jsonl"
+        installed_records.write_text("tampered\n", encoding="utf-8")
+        with self.assertRaises(SystemExit):
+            install_package(package, self.install_root)
 
     def test_history_is_readable(self) -> None:
         package = _package(self.root, "1.0.0")
@@ -93,3 +129,15 @@ class InstallationLifecycleTests(unittest.TestCase):
         (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         with self.assertRaises(SystemExit):
             verify_package(package)
+
+    def test_verify_refuses_missing_signature(self) -> None:
+        package = _package(self.root, "1.0.0")
+        (package / "manifest.sig").unlink()
+        self.assertNotEqual(verify_package(package), 0)
+
+    def test_verify_refuses_tampered_manifest(self) -> None:
+        package = _package(self.root, "1.0.0")
+        manifest = json.loads((package / "manifest.json").read_text())
+        manifest["title"] = "tampered"
+        (package / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        self.assertNotEqual(verify_package(package), 0)
