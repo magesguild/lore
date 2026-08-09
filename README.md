@@ -24,6 +24,7 @@ lore verify <package>
 lore inspect <package>
 lore rollback <package-id> --to <version>
 lore history <package-id>
+lore remove <package-id> --yes
 ```
 
 The default root is `--root ~/.lore/collections`. Installation is isolated
@@ -32,6 +33,10 @@ own immutable version directory, and leaves activation explicit unless
 `--activate` is supplied. `lore activate` and rollback change only that package's
 `active` pointer and history; they never open
 or mutate a Nephesh database, vector database, or any other memory store.
+
+`remove` is the explicit hard-uninstall operation. With `--yes`, it permanently
+removes the installed package directory, including retained versions and the
+active pointer. It does not delete or modify the source package repository.
 
 ## Design principles
 

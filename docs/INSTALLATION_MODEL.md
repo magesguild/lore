@@ -9,6 +9,7 @@ lore install PACKAGE [--root ROOT]
 lore activate PACKAGE_ID --to VERSION [--root ROOT]
 lore rollback PACKAGE_ID --to VERSION [--root ROOT]
 lore history PACKAGE_ID [--root ROOT]
+lore remove PACKAGE_ID --root ROOT --yes
 ```
 
 There is intentionally no `update` command. Updating means installing a new
@@ -53,6 +54,14 @@ Rollback is serialized with installation and activation for that package. It
 selects only a complete, already-installed version.
 
 Rollback is therefore a package-management operation, not a memory operation.
+
+## Hard removal
+
+`lore remove PACKAGE_ID --yes` permanently uninstalls the package's Lore-owned
+installation directory, including retained versions and the active pointer. It
+is separate from rollback and Nephesh projection retirement. The source package
+and corpus repository are not touched. Without `--yes`, the command refuses to
+mutate state. Filesystem permissions remain the final authority.
 
 ## Verification
 

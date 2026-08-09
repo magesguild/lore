@@ -478,6 +478,31 @@ def history_package(package_id: str, root: Path) -> int:
     return 0
 
 
+def remove_package(package_id: str, root: Path, confirmed: bool = False) -> int:
+    """Hard-remove one Lore installation, without touching its source package."""
+    if not confirmed:
+        print(json.dumps({
+            "status": "refused",
+            "reason": "confirmation_required",
+            "hint": "repeat with --yes to permanently remove the installed package",
+        }, indent=2))
+        return 2
+    package_id = _safe_component(package_id)
+    root = root.expanduser().resolve()
+    package_root = root / package_id
+    if not package_root.is_dir() or package_root.is_symlink():
+        print(json.dumps({"status": "failed", "reason": "package_not_installed", "package_id": package_id}, indent=2))
+        return 1
+    shutil.rmtree(package_root)
+    print(json.dumps({
+        "status": "removed",
+        "package_id": package_id,
+        "path": str(package_root),
+        "source_package_untouched": True,
+    }, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="lore")
     parser.add_argument("--version", action="version", version=__version__)
@@ -501,6 +526,10 @@ def main(argv: list[str] | None = None) -> int:
     history = subparsers.add_parser("history")
     history.add_argument("package_id")
     history.add_argument("--root", type=Path, default=Path("~/.lore/collections"))
+    remove = subparsers.add_parser("remove", help="permanently uninstall an installed package")
+    remove.add_argument("package_id")
+    remove.add_argument("--root", type=Path, default=Path("~/.lore/collections"))
+    remove.add_argument("--yes", action="store_true", help="confirm permanent removal")
 
     args = parser.parse_args(argv)
     if args.command == "inspect":
@@ -515,6 +544,8 @@ def main(argv: list[str] | None = None) -> int:
         return rollback_package(args.package_id, args.version, args.root)
     if args.command == "history":
         return history_package(args.package_id, args.root)
+    if args.command == "remove":
+        return remove_package(args.package_id, args.root, args.yes)
     return 2
 
 

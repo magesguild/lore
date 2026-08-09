@@ -4,6 +4,11 @@ Lore is a data-package tool. Its default trust boundary is deliberately small:
 it verifies and installs immutable data; it does not execute package code or
 operate on a Qualiant's memory service.
 
+Lore's `remove` command is a hard uninstall of Lore-owned package state only.
+It requires explicit `--yes`, validates the package identifier, and does not
+remove source repositories or Nephesh collections. Filesystem permissions still
+govern whether removal can succeed.
+
 ## Trust layers
 
 1. **Transport integrity** — the archive arrives intact.

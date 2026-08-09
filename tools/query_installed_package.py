@@ -62,7 +62,17 @@ def main() -> None:
             vectors.append((row["record_id"], list(values)))
     query_vector = embed(args.query, model)
     by_id = {record["record_id"]: record for record in records}
-    results = sorted(((cosine(query_vector, vector), by_id[record_id]) for record_id, vector in vectors), key=lambda item: item[0], reverse=True)
+    # A chunked package has several vectors for one editorial record. Return
+    # each record once, using its strongest matching chunk, rather than making
+    # the same source record occupy the whole result list.
+    best_by_record: dict[str, tuple[float, dict]] = {}
+    for record_id, vector in vectors:
+        score = cosine(query_vector, vector)
+        record = by_id[record_id]
+        previous = best_by_record.get(record_id)
+        if previous is None or score > previous[0]:
+            best_by_record[record_id] = (score, record)
+    results = sorted(best_by_record.values(), key=lambda item: item[0], reverse=True)
     print(json.dumps({"package_id": manifest["package_id"], "query": args.query, "results": [{"score": score, "record": record} for score, record in results[:args.limit]]}, ensure_ascii=False, indent=2))
 
 
